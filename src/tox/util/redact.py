@@ -34,6 +34,17 @@ _SECRET_ENV_VAR_REGEX: Final[re.Pattern[str]] = re.compile(
 )
 
 
+def is_secret_name(name: str) -> bool:
+    """Check whether ``name`` identifies something secret-looking (API key, password, token, ...).
+
+    :param name: the variable / option name to test against the secret keyword regex.
+
+    :returns: ``True`` when only the name (and presence) of the value may be shown, never its content.
+
+    """
+    return bool(_SECRET_ENV_VAR_REGEX.match(name))
+
+
 def redact_value(name: str, value: str) -> str:
     """Mask ``value`` if ``name`` looks like it identifies a secret.
 
@@ -73,6 +84,7 @@ def redact_argv(argv: Sequence[str]) -> list[str]:
 
 
 __all__ = (
+    "is_secret_name",
     "redact_argv",
     "redact_value",
 )

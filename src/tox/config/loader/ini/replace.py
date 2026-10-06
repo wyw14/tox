@@ -39,11 +39,14 @@ class ReplaceReferenceIni(ReplaceReference):
             if settings["section"] is None and settings["full_env"]:
                 settings["section"] = settings["full_env"]
 
+            target_section = settings["section"] or settings["env"] or conf_args.env_name or self.loader.core_section.name
+            conf_args.trace and conf_args.trace.annotate(target=f"{target_section}.{key}")
             try:
                 return self._load_from_sources(settings, key, conf_args)
             except KeyError:  # if the lookup failed replace - else keep
                 # we cannot raise here as that would mean users could not write factorials:
                 #   depends = {py39,py38}-{,b}
+                conf_args.trace and conf_args.trace.annotate(missing=True, default=settings["default"])
                 return settings["default"]
         return None
 
@@ -52,7 +55,7 @@ class ReplaceReferenceIni(ReplaceReference):
             try:
                 if isinstance(src, SectionProxy):
                     return self._resolve_section_proxy(src, key, conf_args)
-                value = src.load(key, conf_args.chain)
+                value = src.load(key, conf_args.chain, conf_args.trace)
             except KeyError:  # if fails, keep trying maybe another source can satisfy # ruff:ignore[try-except-in-loop]
                 pass
             else:

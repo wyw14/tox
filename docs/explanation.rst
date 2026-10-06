@@ -916,6 +916,102 @@ For example, putting ``ignore_base_python_conflict`` in ``[testenv]`` instead of
 See the :ref:`Core <conf-core>` and :ref:`tox environment <conf-testenv>` reference sections for which options belong
 where.
 
+Explaining a configuration value
+================================
+
+When an environment inherits shared configuration, uses conditional :ref:`factors <factors>` or references other keys
+and environment variables, finding where the final value comes from can be non-trivial. ``tox config --explain`` gives
+a read-only breakdown for one or more configuration keys, without creating environments or running anything:
+
+.. code-block:: console
+
+    $ tox config -e py313-django50 --explain commands deps
+
+For every key and selected environment the explanation lists:
+
+- **definitions** — the candidate definitions (the environment section, shared base sections, command line overrides
+  and the registered default) with the selected one marked, including the conditional lines that matched for the
+  environment;
+- **reference chain** — every reference used while substituting the value (``{env:...}``, ``{[section]key}``,
+  ``{factor:...}``, ...), where it resolves and, when applicable, its resolved value;
+- **result** — the final, substituted value tox uses.
+
+Factor conditions that did not match are hidden by default; pass ``--show-unmatched`` (alias ``--unmatched``) to list
+them as well. Core options can be explained with ``--core`` (or ``-e ALL``).
+
+.. tab:: INI (deprecated)
+
+    .. code-block:: ini
+
+        [testenv]
+        deps =
+            pytest
+            django50: Django>=5.0
+            django42: Django>=4.2,<5.0
+
+    .. code-block:: text
+
+        [testenv:py313-django50] deps
+        definitions:
+          [x] [testenv] in tox.ini
+              + pytest
+              + django50: Django>=5.0
+          [ ] default value
+          1 unmatched condition(s) hidden (use --show-unmatched)
+        result:
+          [
+            "pytest",
+            "Django>=5.0"
+          ]
+
+.. tab:: TOML
+
+    .. code-block:: toml
+
+        [env_run_base]
+        deps = [
+          "pytest",
+          { replace = "if", condition = "factor.django50", then = "Django>=5.0", extend = true },
+          { replace = "if", condition = "factor.django42", then = "Django>=4.2,<5.0", extend = true },
+        ]
+
+    The same explanation is available as machine-readable JSON with ``--format json``:
+
+    .. code-block:: json
+
+        {
+          "env": {
+            "py313-django50": {
+              "deps": {
+                "definitions": [{"source": "[env_run_base]", "selected": true}],
+                "references": [],
+                "unmatched_count": 1,
+                "value": ["pytest", "Django>=5.0"],
+                "error": null
+              }
+            }
+          }
+        }
+
+Secret-looking environment variables (names containing e.g. ``token``, ``password`` or ``api``) are reported by name
+and whether they were provided, never with their content — neither in the reference chain nor inside the final value.
+Circular and missing references keep the original error together with the active resolution chain:
+
+.. code-block:: console
+
+    $ tox config -e a --explain description --format json
+
+.. code-block:: json
+
+    {
+      "error": {
+        "type": "HandledError",
+        "error": "HandledError(\"replace failed in a.description with CircularChainError('...')\")",
+        "cause": "CircularChainError('circular chain detected testenv.description, ...')",
+        "chain": ["testenv.description", "testenv.env_log_dir", "testenv.description"]
+      }
+    }
+
 ******************
  Related projects
 ******************

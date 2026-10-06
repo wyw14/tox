@@ -235,21 +235,75 @@ class Replacer:
         conf_args = self.conf_args.copy()
         flattened_args = [self.join(arg) for arg in value.expr]
         of_type, *args = flattened_args
-        replace_value = self._resolve_replace(of_type, args, flattened_args, conf_args)
-        if replace_value is not None:
-            needs_expansion = any(isinstance(m, MatchExpression) for m in find_replace_expr(replace_value))
-            if needs_expansion and self.recursive:
-                try:
-                    return type(self)(self.conf, self.reference, conf_args, self.depth + 1).expand(replace_value)
-                except MatchRecursionError as err:
-                    LOGGER.warning(str(err))
-                    return replace_value
-            return replace_value
-        # else: fall through -- when replacement is impossible, treat `{` as if escaped.
-        #     If we can't replace, keep what was there, and continue looking for additional replaces
-        #     NOTE: can't raise because the content may be a factorial expression where we don't
-        #           want to enforce escaping curly braces, for example`env_list = {py39,py38}-{,dep}` should work
-        return f"{REPLACE_START}{ARG_DELIMITER.join(flattened_args)}{REPLACE_END}"
+        trace = conf_args.trace
+        expression = f"{REPLACE_START}{ARG_DELIMITER.join(flattened_args)}{REPLACE_END}"
+        event = None
+        if trace is not None:
+            kind = self._trace_kind(of_type, flattened_args)
+            traced_name = args[0] if args and of_type in {"env", "factor"} else None
+            event = trace.event(expression, kind=kind, name=traced_name, chain=conf_args.chain)
+            trace.push(event)
+        try:
+            try:
+                replace_value = self._resolve_replace(of_type, args, flattened_args, conf_args)
+            except Exception as exception:
+                if event is not None:
+                    event.error = repr(exception)
+                    event.chain = conf_args.chain.copy()
+                raise
+            if event is not None:
+                self._record_event(event, of_type, args, replace_value, conf_args)
+            if replace_value is not None:
+                needs_expansion = any(isinstance(m, MatchExpression) for m in find_replace_expr(replace_value))
+                if needs_expansion and self.recursive:
+                    try:
+                        return type(self)(self.conf, self.reference, conf_args, self.depth + 1).expand(replace_value)
+                    except MatchRecursionError as err:
+                        LOGGER.warning(str(err))
+                        return replace_value
+                return replace_value
+            # else: fall through -- when replacement is impossible, treat `{` as if escaped.
+            #     If we can't replace, keep what was there, and continue looking for additional replaces
+            #     NOTE: can't raise because the content may be a factorial expression where we don't
+            #           want to enforce escaping curly braces, for example`env_list = {py39,py38}-{,dep}` should work
+            return f"{REPLACE_START}{ARG_DELIMITER.join(flattened_args)}{REPLACE_END}"
+        finally:
+            if trace is not None:
+                trace.pop(event)
+
+    @staticmethod
+    def _trace_kind(of_type: str, flattened_args: list[str]) -> str:
+        if of_type == "/":
+            return "path"
+        if not of_type and flattened_args == [""]:
+            return "pathsep"
+        if of_type in {"env", "tty", "posargs", "glob", "factor"}:
+            return of_type
+        return "ref"
+
+    @staticmethod
+    def _record_event(
+        event: Any,
+        of_type: str,
+        args: list[str],
+        replace_value: str | None,
+        conf_args: ConfigLoadArgs,
+    ) -> None:
+        event.chain = conf_args.chain.copy()
+        if of_type == "env":
+            has_default = len(args) > 1
+            if has_default:
+                event.default = ARG_DELIMITER.join(args[1:])
+            if event.provided is None:
+                event.provided = False
+            event.missing = event.provided is False and not has_default
+            event.resolved = None if event.secret else replace_value
+        elif event.kind == "ref":
+            event.resolved = replace_value
+            if replace_value is None:
+                event.missing = True
+        else:
+            event.resolved = replace_value
 
     def _resolve_replace(
         self, of_type: str, args: list[str], flattened_args: list[str], conf_args: ConfigLoadArgs
@@ -330,7 +384,7 @@ def replace_env(conf: Config | None, args: list[str], conf_args: ConfigLoadArgs)
             conf_args.chain.append(new_key)
             env_conf = conf.get_env(conf_args.env_name)
             try:
-                set_env: SetEnv = env_conf.load("set_env", chain=conf_args.chain)
+                set_env: SetEnv = env_conf.load("set_env", chain=conf_args.chain, trace=conf_args.trace)
             except CircularChainError:
                 if not (
                     conf_args.chain[-1].endswith(".set_env")
@@ -339,6 +393,7 @@ def replace_env(conf: Config | None, args: list[str], conf_args: ConfigLoadArgs)
                     raise
             else:
                 if key in set_env:
+                    conf_args.trace and conf_args.trace.annotate(provided=True, target="set_env")
                     return set_env.load(key, conf_args)
         elif conf_args.chain[-1] != new_key:  # if there's a chain but only self-refers than use os.environ
             circular = ", ".join(i[4:] for i in conf_args.chain[conf_args.chain.index(new_key) :])
@@ -346,8 +401,10 @@ def replace_env(conf: Config | None, args: list[str], conf_args: ConfigLoadArgs)
             raise MatchRecursionError(msg)
 
     if key in os.environ:
+        conf_args.trace and conf_args.trace.annotate(provided=True, target="os.environ")
         return os.environ[key]
 
+    conf_args.trace and conf_args.trace.annotate(provided=False)
     return "" if len(args) == 1 else ARG_DELIMITER.join(args[1:])
 
 

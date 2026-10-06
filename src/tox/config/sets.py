@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
     from tox.config.loader.api import Loader
     from tox.config.main import Config
+    from tox.config.trace import ConfigTrace
 
     from .loader.convert import Factory
     from .loader.section import Section
@@ -195,17 +196,19 @@ class ConfigSet(ABC):
         """
         return self.load(item)
 
-    def load(self, item: str, chain: list[str] | None = None) -> Any:
+    def load(self, item: str, chain: list[str] | None = None, trace: ConfigTrace | None = None) -> Any:
         """Get the config value for a given key (will materialize in case of dynamic config).
 
         :param item: the config key
         :param chain: a chain of configuration keys already loaded for this load operation (used to detect circles)
+        :param trace: an optional read-only recorder of references resolved while materializing the value
 
         :returns: the configuration value
 
         """
         config_definition = self._defined[item]
-        return config_definition.__call__(self._conf, self.loaders, ConfigLoadArgs(chain, self.name, self.env_name))  # ruff:ignore[unnecessary-dunder-call]
+        args = ConfigLoadArgs(chain, self.name, self.env_name, trace)
+        return config_definition.__call__(self._conf, self.loaders, args)  # ruff:ignore[unnecessary-dunder-call]
 
     def get(self, item: str, of_type: type[V]) -> V:
         """Get the config value for a given key, verified to be of the declared type.

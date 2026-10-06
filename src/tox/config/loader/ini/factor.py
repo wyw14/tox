@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import sys
 import sysconfig
+from dataclasses import dataclass
 from itertools import chain, groupby, product
 from typing import TYPE_CHECKING
 
@@ -17,7 +18,26 @@ LATEST_PYTHON_MINOR_MIN: int = 10
 LATEST_PYTHON_MINOR_MAX: int = 14
 
 
-def filter_for_env(value: str, name: str | None) -> str:
+@dataclass(frozen=True)
+class FactorSelection:
+    """One line of a factor-conditional value and whether it contributes to the environment.
+
+    :param prefix: the raw conditional prefix (e.g. ``py313, !lint``), or ``None`` for unconditional lines
+    :param factors: the parsed factor expression groups, or ``None`` for unconditional lines
+    :param content: the content of the line (after the ``factor:`` marker)
+    :param matched: whether this line is selected for the environment; unconditional continuation lines dropped after
+        a non-matching factor line report ``False``
+
+    """
+
+    prefix: str | None
+    factors: list[list[tuple[str, bool]]] | None
+    content: str
+    matched: bool
+
+
+def active_factors(name: str | None) -> set[str]:
+    """The factors active for an environment name, including the implicit platform and machine ISA factors."""
     env_factors = (
         set(chain.from_iterable([(i for i, _ in a) for a in find_factor_groups(name)])) if name is not None else set()
     )
@@ -31,27 +51,36 @@ def filter_for_env(value: str, name: str | None) -> str:
         # adding the machine ISA would cause cross-architecture conflicts (#3903).
         if not (env_factors & KNOWN_ARCHITECTURES) and not any(normalize_isa(f) == machine_isa for f in env_factors):
             current.add(machine_isa)
-    overall: list[str] = []
+    return current
+
+
+def select_factor_lines(value: str, name: str | None) -> Iterator[FactorSelection]:
+    """Yield every line of ``value`` together with whether the environment selects it."""
+    current = active_factors(name)
     active_continuation = False
     pending_skip = False
-    for factors, content in expand_factors(value):
+    for prefix, factors, content in iter_factor_lines(value):
         if factors is None:
             if pending_skip and not active_continuation and not content.endswith("\\"):
                 pending_skip = False
+                yield FactorSelection(prefix, factors, content, False)
                 continue
-            if content:
-                overall.append(content)
+            included = bool(content)
+            yield FactorSelection(prefix, factors, content, included)
             active_continuation = content.endswith("\\") if content else active_continuation
             pending_skip = False
         else:
             matched = any(all((a_name in current) ^ negate for a_name, negate in group) for group in factors)
+            yield FactorSelection(prefix, factors, content, matched)
             if matched:
-                overall.append(content)
                 active_continuation = content.endswith("\\")
                 pending_skip = False
             else:
                 pending_skip = content.endswith("\\")
-    return "\n".join(overall)
+
+
+def filter_for_env(value: str, name: str | None) -> str:
+    return "\n".join(line.content for line in select_factor_lines(value, name) if line.matched)
 
 
 def find_envs(value: str) -> Iterator[str]:
@@ -74,7 +103,15 @@ def explode_factor(group: list[tuple[str, bool]]) -> str:
     return "-".join([name for name, _ in group])
 
 
-def expand_factors(value: str) -> Iterator[tuple[list[list[tuple[str, bool]]] | None, str]]:
+def iter_factor_lines(
+    value: str,
+) -> Iterator[tuple[str | None, list[list[tuple[str, bool]]] | None, str]]:
+    """Split ``value`` into lines, yielding ``(prefix, factor groups, content)`` per line.
+
+    Unconditional lines yield ``prefix`` and groups as ``None``. Lines whose factor prefix cannot be parsed are kept
+    whole, as unconditional content.
+
+    """
     for line in value.split("\n"):
         factors: list[list[tuple[str, bool]]] | None = None
         marker_search = re.search(
@@ -87,12 +124,20 @@ def expand_factors(value: str) -> Iterator[tuple[list[list[tuple[str, bool]]] | 
         )
         marker_at, content = marker_search.start() if marker_search else -1, line
         if marker_at != -1:
+            prefix = line[:marker_at].strip()
             try:
-                factors = list(find_factor_groups(line[:marker_at].strip()))
+                factors = list(find_factor_groups(prefix))
             except ValueError:
                 pass  # when cannot extract factors keep the entire line
             else:
                 content = line[marker_at + 1 :].strip()
+        else:
+            prefix = None
+        yield prefix, factors, content
+
+
+def expand_factors(value: str) -> Iterator[tuple[list[list[tuple[str, bool]]] | None, str]]:
+    for _prefix, factors, content in iter_factor_lines(value):
         yield factors, content
 
 
@@ -208,9 +253,13 @@ def expand_ranges(value: str) -> str:
 __all__ = (
     "LATEST_PYTHON_MINOR_MAX",
     "LATEST_PYTHON_MINOR_MIN",
+    "FactorSelection",
+    "active_factors",
     "expand_factors",
     "expand_ranges",
     "extend_factors",
     "filter_for_env",
     "find_envs",
+    "iter_factor_lines",
+    "select_factor_lines",
 )

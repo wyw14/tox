@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, get_args
 
 from tox.plugin import impl
+from tox.report import HandledError
 from tox.session.cmd.run.common import env_run_create_flags
 from tox.session.env_select import CliEnv, register_env_select_flags
 
@@ -34,6 +35,23 @@ def tox_add_option(parser: ToxParser) -> None:
         dest="show_core",
     )
     our.add_argument(
+        "--explain",
+        nargs="+",
+        default=[],
+        dest="explain_keys",
+        metavar="key",
+        help="explain, without running anything, how the final value of the configuration keys is derived: "
+        "the selected definitions, the reference chain and the substituted result",
+    )
+    our.add_argument(
+        "--show-unmatched",
+        "--unmatched",
+        action="store_true",
+        default=False,
+        dest="show_unmatched",
+        help="with --explain, also list factor conditions that did not match for the current environment",
+    )
+    our.add_argument(
         "--format",
         choices=get_args(ConfigFormat),
         default="ini",
@@ -53,11 +71,21 @@ def tox_add_option(parser: ToxParser) -> None:
 
 
 def show_config(state: State) -> int:
+    from .explain import show_config_explain, show_config_explain_json
     from .ini import show_config_ini  # ruff:ignore[import-outside-top-level]
     from .json_format import show_config_json  # ruff:ignore[import-outside-top-level]
     from .toml_format import show_config_toml  # ruff:ignore[import-outside-top-level]
 
-    fmt: ConfigFormat = state.conf.options.config_format
+    if state.conf.options.explain_keys:
+        fmt: ConfigFormat = state.conf.options.config_format
+        if fmt == "json":
+            return show_config_explain_json(state)
+        if fmt == "toml":
+            msg = "--explain is supported with --format ini or --format json"
+            raise HandledError(msg)
+        return show_config_explain(state)
+
+    fmt = state.conf.options.config_format
     if fmt == "json":
         return show_config_json(state)
     if fmt == "toml":

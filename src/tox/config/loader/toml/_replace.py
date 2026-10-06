@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from tox.config.main import Config
     from tox.config.sets import ConfigSet
     from tox.config.source.toml_pyproject import TomlSection
+    from tox.config.trace import TraceEvent
 
     from ._api import TomlTypes
 
@@ -109,31 +110,81 @@ class Unroll:
                 marker = value.get("marker")
                 if replace_type == "posargs" and self.conf is not None:
                     got_posargs = load_posargs(self.conf, self.args)
-                    posargs_result: TomlTypes = (
-                        [self(v, depth, skip_str=skip_str) for v in cast("list[str]", value.get("default", []))]
-                        if got_posargs is None
-                        else [*got_posargs]
-                    )
+                    event = self._trace_event("posargs", value, depth)
+                    try:
+                        posargs_result: TomlTypes = (
+                            [self(v, depth, skip_str=skip_str) for v in cast("list[str]", value.get("default", []))]
+                            if got_posargs is None
+                            else [*got_posargs]
+                        )
+                        if event is not None:
+                            event.resolved = str(posargs_result)
+                    except Exception as exception:
+                        self._trace_failure(event, exception)
+                        raise
+                    finally:
+                        self._trace_pop(event)
                     return {"value": posargs_result, "marker": marker} if marker else posargs_result
                 if replace_type == "env":
                     name = validate(value["name"], str)
                     default = validate(self(value.get("default", ""), depth, skip_str=skip_str), str)
-                    env_result: TomlTypes = (
-                        _env_expression(name, default)  # set_env resolves it when read, seeing the keys next to it
-                        if skip_str
-                        # use a copy of the chain so this substitution's env references do not leak into
-                        # adjacent entries of the same value tree and spuriously trip the circular check (#2869)
-                        else replace_env(self.conf, [name, default], self.args.copy())
-                    )
+                    event = self._trace_event("env", value, depth, name=name)
+                    try:
+                        env_result: TomlTypes = (
+                            _env_expression(name, default)  # set_env resolves it when read, seeing the keys next to it
+                            if skip_str
+                            # use a copy of the chain so this substitution's env references do not leak into
+                            # adjacent entries of the same value tree and spuriously trip the circular check (#2869)
+                            else replace_env(self.conf, [name, default], self.args.copy())
+                        )
+                        if event is not None:
+                            event.default = default if "default" in value else None
+                            event.resolved = None if event.secret else str(env_result)
+                    except Exception as exception:
+                        self._trace_failure(event, exception)
+                        raise
+                    finally:
+                        self._trace_pop(event)
                     return {"value": env_result, "marker": marker} if marker else env_result
                 if replace_type == "glob":
-                    glob_result = _replace_glob_toml(self.conf, value)
+                    event = self._trace_event("glob", value, depth, name=validate(value.get("pattern", ""), str))
+                    try:
+                        glob_result = _replace_glob_toml(self.conf, value)
+                        if event is not None:
+                            event.resolved = str(glob_result)
+                    except Exception as exception:
+                        self._trace_failure(event, exception)
+                        raise
+                    finally:
+                        self._trace_pop(event)
                     return {"value": glob_result, "marker": marker} if marker else glob_result
                 if replace_type == "if":
-                    if_result = _replace_if_toml(value, self, depth, self.factors, skip_str=skip_str)
+                    event = self._trace_event("if", value, depth)
+                    if event is not None:
+                        event.condition = validate(value.get("condition"), str)
+                    try:
+                        if event is not None and event.condition is not None:
+                            event.matched = _evaluate_condition(
+                                event.condition, self.factors, self.args.env_name
+                            )
+                        if_result = _replace_if_toml(value, self, depth, self.factors, skip_str=skip_str)
+                    except Exception as exception:
+                        self._trace_failure(event, exception)
+                        raise
+                    finally:
+                        self._trace_pop(event)
                     return {"value": if_result, "marker": marker} if marker else if_result
                 if replace_type == "ref":  # pragma: no branch
-                    ref_result = self._replace_ref(value, depth, skip_str=skip_str)
+                    event = self._trace_event("ref", value, depth)
+                    try:
+                        ref_result = self._replace_ref(value, depth, skip_str=skip_str)
+                        if event is not None and event.resolved is None and not event.missing:
+                            event.resolved = str(ref_result)
+                    except Exception as exception:
+                        self._trace_failure(event, exception)
+                        raise
+                    finally:
+                        self._trace_pop(event)
                     return {"value": ref_result, "marker": marker} if marker else ref_result
 
             res_dict: dict[str, TomlTypes] = {}
@@ -142,10 +193,37 @@ class Unroll:
             value = res_dict
         return value
 
+    def _trace_event(
+        self, replace_type: str, value: dict[str, TomlTypes], depth: int, *, name: str | None = None
+    ) -> TraceEvent | None:
+        trace = self.args.trace
+        if trace is None:
+            return None
+        event = trace.event(
+            _describe_replace(replace_type, value),
+            kind="ref" if replace_type == "ref" else replace_type,
+            name=name,
+            chain=[*self.args.chain, *self._refs],
+        )
+        trace.push(event)
+        return event
+
+    def _trace_pop(self, event: TraceEvent | None) -> None:
+        if event is not None:
+            self.args.trace and self.args.trace.pop(event)
+
+    def _trace_failure(self, event: TraceEvent | None, exception: Exception) -> None:
+        if event is not None:
+            event.error = repr(exception)
+            event.chain = [*self.args.chain, *self._refs]
+
     def _replace_ref(self, value: dict[str, TomlTypes], depth: int, *, skip_str: bool = False) -> TomlTypes:
         if self.conf is not None and (env := value.get("env")) and (key := value.get("key")):
             # the referenced value arrives converted for its own key, return it in the raw shape a TOML key parses
-            result = self.conf.get_env(cast("str", env))[cast("str", key)]
+            self.args.trace and self.args.trace.annotate(target=f"{env}.{key}")
+            result = self.conf.get_env(cast("str", env)).load(
+                cast("str", key), trace=self.args.trace
+            )
             if isinstance(result, (PythonDeps, PythonConstraints)):
                 return cast("TomlTypes", result.lines())
             if isinstance(result, Command):
@@ -155,7 +233,9 @@ class Unroll:
             return cast("TomlTypes", result)
         if of := value.get("of"):
             validated_of = validate(of, list[str])
-            if (path := self.loader.section.SEP.join(validated_of)) in self._refs:
+            path = self.loader.section.SEP.join(validated_of)
+            self.args.trace and self.args.trace.annotate(target=path)
+            if path in self._refs:
                 msg = f"circular reference {' -> '.join([*self._refs, path])}"
                 raise MatchRecursionError(msg)
             loaded: TomlTypes = self.loader.load_raw_from_root(path)
@@ -176,6 +256,19 @@ class Unroll:
             finally:
                 self._refs.pop()
         return value
+
+
+def _describe_replace(replace_type: str, value: dict[str, TomlTypes]) -> str:
+    """Render a structured TOML replacement as a short, readable reference expression."""
+    if replace_type == "env":
+        return f'{{replace = "env", name = {value.get("name")!r}}}'
+    if replace_type == "if":
+        return f'{{replace = "if", condition = {value.get("condition")!r}}}'
+    if replace_type == "ref":
+        if value.get("env") and value.get("key"):
+            return f'{{replace = "ref", env = {value.get("env")!r}, key = {value.get("key")!r}}}'
+        return f'{{replace = "ref", of = {value.get("of")!r}}}'
+    return f'{{replace = {replace_type!r}}}'
 
 
 def _env_expression(name: str, default: str) -> str:
@@ -320,11 +413,15 @@ class TomlReplaceLoader(ReplaceReference):
     def __call__(self, value: str, conf_args: ConfigLoadArgs) -> str | None:
         if match := _REFERENCE_PATTERN.search(value):
             settings = match.groupdict()
+            target_section = settings["section"] or conf_args.env_name
+            conf_args.trace and conf_args.trace.annotate(
+                target=f"{target_section}.{settings['key']}" if target_section else settings["key"]
+            )
             exception: Exception | None = None
             try:
                 for src in self._config_value_sources(settings["section"], conf_args.env_name):
                     try:
-                        value = src.load(settings["key"], conf_args.chain)
+                        value = src.load(settings["key"], conf_args.chain, conf_args.trace)
                     except KeyError as exc:  # if fails, keep trying maybe another source can satisfy # ruff:ignore[try-except-in-loop]
                         exception = exc
                     else:
@@ -334,6 +431,7 @@ class TomlReplaceLoader(ReplaceReference):
             if exception is not None:
                 if isinstance(exception, KeyError):  # if the lookup failed replace - else keep
                     default = settings["default"]
+                    conf_args.trace and conf_args.trace.annotate(missing=True, default=default)
                     if default is not None:
                         return default
                     return None  # keep original text, consistent with ini loader behavior
@@ -366,7 +464,9 @@ class RawLoader:
         self._loader = loader
         self._section = section
 
-    def load(self, item: str, chain: list[str] | None = None) -> Any:  # ruff:ignore[unused-method-argument]
+    def load(  # ruff:ignore[unused-method-argument]
+        self, item: str, chain: list[str] | None = None, trace: object = None
+    ) -> Any:
         return self._loader.load_raw_from_root(f"{self._section}{self._loader.section.SEP}{item}")
 
 

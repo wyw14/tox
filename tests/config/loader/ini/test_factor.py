@@ -15,6 +15,7 @@ from tox.config.loader.ini.factor import (
     expand_ranges,
     filter_for_env,
     find_envs,
+    select_factor_lines,
 )
 from tox.config.source.ini_section import IniSection
 
@@ -108,6 +109,38 @@ def test_factor_env_filter(env: str, complex_example: str) -> None:
         assert "complex" in result
     else:
         assert "complex" not in result
+
+
+def test_select_factor_lines_marks_match() -> None:
+    value = dedent(
+        """
+        always
+        py: py only
+        !py: not py
+        """
+    )
+    lines = list(select_factor_lines(value, "py"))
+    assert [(line.prefix, line.matched) for line in lines] == [
+        (None, False),  # leading blank line
+        (None, True),
+        ("py", True),
+        ("!py", False),
+        (None, False),  # trailing blank line
+    ]
+    assert "\n".join(line.content for line in lines if line.matched) == filter_for_env(value, "py")
+
+
+def test_select_factor_lines_negation() -> None:
+    value = dedent(
+        """
+        py, a: both
+        other: nope
+        """
+    )
+    matched = [(line.prefix, line.matched) for line in select_factor_lines(value, "c-b")]
+    assert ("py, a", False) in matched
+    assert ("other", False) in matched
+    assert "\n".join(line.content for line in select_factor_lines(value, "py-a") if line.matched) == "both"
 
 
 def test_factor_env_list(tox_ini_conf: ToxIniCreator) -> None:

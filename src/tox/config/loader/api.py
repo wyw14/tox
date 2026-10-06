@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from tox.config.cli.parser import ToxParser
     from tox.config.main import Config
     from tox.config.set_env import SetEnvRaw, SetEnvReference
+    from tox.config.trace import ConfigTrace
 
     from .section import Section
 
@@ -89,19 +90,27 @@ class Override:  # ruff:ignore[eq-without-hash]
 class ConfigLoadArgs:
     """Arguments that help loading a configuration value."""
 
-    def __init__(self, chain: list[str] | None, name: str | None, env_name: str | None) -> None:
+    def __init__(
+        self,
+        chain: list[str] | None,
+        name: str | None,
+        env_name: str | None,
+        trace: ConfigTrace | None = None,
+    ) -> None:
         """:param chain: the configuration chain (useful to detect circular references)
         :param name: the name of the configuration
         :param env_name: the tox environment this load is for
+        :param trace: an optional read-only recorder of the references resolved during this load
 
         """
         self.chain: list[str] = chain or []
         self.name = name
         self.env_name = env_name
+        self.trace = trace
 
     def copy(self) -> ConfigLoadArgs:
         """:returns: create a copy of the object"""
-        return ConfigLoadArgs(self.chain.copy(), self.name, self.env_name)
+        return ConfigLoadArgs(self.chain.copy(), self.name, self.env_name, self.trace)
 
 
 OverrideMap = Mapping[str, list[Override]]

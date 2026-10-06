@@ -58,14 +58,18 @@ class IniLoader(StrConvert, Loader[str]):
         return self.process_raw(conf, env_name, self._section_proxy[key])
 
     @staticmethod
-    def process_raw(conf: Config | None, env_name: str | None, value: str) -> str:
+    def _strip_comments(value: str) -> str:
         # strip comments
         elements: list[str] = []
         for line in value.split("\n"):
             if not line.startswith("#"):
                 part = _COMMENTS.sub("", line)
                 elements.append(part.replace("\\#", "#"))
-        strip_comments = "\n".join(elements).replace("\r", "")
+        return "\n".join(elements).replace("\r", "")
+
+    @staticmethod
+    def process_raw(conf: Config | None, env_name: str | None, value: str) -> str:
+        strip_comments = IniLoader._strip_comments(value)
         if conf is None:  # conf is None when we're loading the global tox configuration file for the CLI
             factor_filtered = strip_comments  # we don't support factor and replace functionality there
         else:
@@ -73,6 +77,29 @@ class IniLoader(StrConvert, Loader[str]):
             if not factor_filtered and strip_comments.strip():
                 raise KeyError(value)
         return factor_filtered.replace("\\\n", "")
+
+    def explain_raw(self, key: str, conf: Config, env_name: str | None) -> dict[str, object]:
+        """Describe the raw, not yet substituted definition of ``key`` for ``tox config --explain``.
+
+        :returns: the comment-stripped raw text together with the factor-conditional lines split into the ones the
+            environment selects and the ones it does not
+
+        """
+        from tox.config.loader.ini.factor import select_factor_lines  # ruff:ignore[import-outside-top-level]
+
+        stripped = self._strip_comments(self._section_proxy[key])
+        lines = list(select_factor_lines(stripped, env_name))
+        selected: list[dict[str, object]] = [
+            {"prefix": line.prefix, "content": line.content}
+            for line in lines
+            if line.matched and (line.content or line.factors is not None)
+        ]
+        unmatched: list[dict[str, object]] = [
+            {"prefix": line.prefix, "content": line.content}
+            for line in lines
+            if line.factors is not None and not line.matched
+        ]
+        return {"raw": stripped, "selected_parts": selected, "unmatched_parts": unmatched}
 
     @override
     def build(

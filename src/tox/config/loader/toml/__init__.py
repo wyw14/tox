@@ -108,6 +108,17 @@ class TomlLoader(Loader[TomlTypes]):
     def found_keys(self) -> set[str]:
         return set(self.content.keys()) - self._unused_exclude
 
+    def explain_raw(self, key: str, conf: Config, env_name: str | None) -> dict[str, object]:  # ruff:ignore[unused-argument]
+        """Describe the raw structured TOML definition of ``key`` for ``tox config --explain``."""
+        import json  # ruff:ignore[import-outside-top-level]
+
+        raw = self.content[key]
+        try:
+            rendered = json.dumps(raw, default=str)
+        except TypeError:
+            rendered = str(raw)
+        return {"raw": rendered, "selected_parts": [], "unmatched_parts": []}
+
     @staticmethod
     @override
     def to_str(value: TomlTypes) -> str:
