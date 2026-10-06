@@ -362,3 +362,281 @@ def test_depends_circular_run(tox_project: ToxProjectCreator) -> None:
     outcome.assert_failed(code=-2)
     assert "circular dependency detected between environments: a | b" in outcome.out, outcome.out
     assert "Traceback" not in outcome.err, outcome.err
+
+
+_PLAN_INI = """
+[tox]
+env_list = a,b,c,cov,lint
+[testenv]
+package = skip
+[testenv:cov]
+depends = a,b,ghost
+[testenv:b]
+depends = c
+"""
+
+
+def test_depends_plan_subset(tox_project: ToxProjectCreator) -> None:
+    # only selected environments execute; declared prerequisites are annotated, nothing is pulled into the run
+    project = tox_project({"tox.ini": _PLAN_INI})
+
+    outcome = project.run("de", "-e", "cov,b")
+
+    outcome.assert_success()
+    expected = dedent("""\
+    Execution order: b, cov
+    b
+       c (not selected)
+    cov
+       a (not selected)
+       b
+          c (not selected)
+       ghost (undefined)
+    """)
+    assert outcome.out == expected
+
+
+def test_depends_plan_indirect_active(tox_project: ToxProjectCreator) -> None:
+    # the whole selected chain is active: c is an indirect prerequisite of cov and visible through b
+    project = tox_project({"tox.ini": _PLAN_INI})
+
+    outcome = project.run("de", "-e", "cov,b,c")
+
+    outcome.assert_success()
+    expected = dedent("""\
+    Execution order: c, b, cov
+    c
+    b
+       c
+    cov
+       a (not selected)
+       b
+          c
+       ghost (undefined)
+    """)
+    assert outcome.out == expected
+
+
+def test_depends_plan_only_target(tox_project: ToxProjectCreator) -> None:
+    # a single selected environment never pulls its prerequisites into the execution order
+    project = tox_project({"tox.ini": _PLAN_INI})
+
+    outcome = project.run("de", "-e", "cov")
+
+    outcome.assert_success()
+    expected = dedent("""\
+    Execution order: cov
+    cov
+       a (not selected)
+       b (not selected)
+       ghost (undefined)
+    """)
+    assert outcome.out == expected
+
+
+def test_depends_plan_glob_partial_match(tox_project: ToxProjectCreator) -> None:
+    toml = """
+    env_list = ["py311", "py312", "lint", "cov"]
+    [env_run_base]
+    package = "skip"
+    [env.cov]
+    depends = ["py*", "ghost"]
+    """
+    project = tox_project({"tox.toml": toml})
+
+    outcome = project.run("de", "-e", "cov,py311")
+
+    outcome.assert_success()
+    expected = dedent("""\
+    Execution order: py311, cov
+    py311
+    cov
+       py311
+       py312 (not selected)
+       ghost (undefined)
+    """)
+    assert outcome.out == expected
+
+
+def test_depends_plan_expanded_missing_vs_unselected(tox_project: ToxProjectCreator) -> None:
+    # after factor expansion py311 names an existing unselected env, py313 names no environment at all
+    ini = """
+    [tox]
+    env_list = py311,py312,cov
+    [testenv]
+    package = skip
+    [testenv:cov]
+    depends = py3{11,13}
+    """
+    project = tox_project({"tox.ini": ini})
+
+    outcome = project.run("de", "-e", "cov")
+
+    outcome.assert_success()
+    expected = dedent("""\
+    Execution order: cov
+    cov
+       py311 (not selected)
+       py313 (undefined)
+    """)
+    assert outcome.out == expected
+
+
+def test_depends_plan_glob_no_match_is_undefined(tox_project: ToxProjectCreator) -> None:
+    toml = """
+    env_list = ["lint", "cov"]
+    [env_run_base]
+    package = "skip"
+    [env.cov]
+    depends = ["py*"]
+    """
+    project = tox_project({"tox.toml": toml})
+
+    outcome = project.run("de", "-e", "ALL")
+
+    outcome.assert_success()
+    expected = dedent("""\
+    Execution order: lint, cov
+    lint
+    cov
+       py* (undefined)
+    """)
+    assert outcome.out == expected
+
+
+def test_depends_plan_factor_selection(tox_project: ToxProjectCreator) -> None:
+    toml = """
+    env_list = ["py311", "py312", "cov"]
+    [env_run_base]
+    package = "skip"
+    [env.cov]
+    depends = ["py311"]
+    """
+    project = tox_project({"tox.toml": toml})
+
+    outcome = project.run("de", "-f", "cov")
+
+    outcome.assert_success()
+    expected = dedent("""\
+    Execution order: cov
+    cov
+       py311 (not selected)
+    """)
+    assert outcome.out == expected
+
+
+def test_depends_plan_empty_selection(tox_project: ToxProjectCreator) -> None:
+    project = tox_project({"tox.ini": _PLAN_INI})
+
+    outcome = project.run("de", "-f", "no-such-factor")
+
+    outcome.assert_success()
+    assert outcome.out == "Execution order: \n"
+
+
+def test_depends_plan_deduplicates_declarations(tox_project: ToxProjectCreator) -> None:
+    toml = """
+    env_list = ["b", "cov"]
+    [env_run_base]
+    package = "skip"
+    [env.cov]
+    depends = ["b", "b*"]
+    """
+    project = tox_project({"tox.toml": toml})
+
+    outcome = project.run("de", "-e", "cov,b")
+
+    outcome.assert_success()
+    expected = dedent("""\
+    Execution order: b, cov
+    b
+    cov
+       b
+    """)
+    assert outcome.out == expected
+
+
+def test_depends_plan_package_environments(tox_project: ToxProjectCreator) -> None:
+    ini = """
+    [tox]
+    env_list = py,cov
+    [testenv]
+    package = wheel
+    [testenv:cov]
+    skip_install = true
+    depends = py,ghost
+    """
+    project = tox_project({"tox.ini": ini, "pyproject.toml": ""})
+
+    outcome = project.run("de", "-e", "cov,py")
+
+    outcome.assert_success()
+    expected = dedent("""\
+    Execution order: py, cov
+    py ~ .pkg
+    cov
+       py ~ .pkg
+       ghost (undefined)
+    """)
+    assert outcome.out == expected
+
+
+_CYCLE_INI = """
+[tox]
+env_list = a,b,cov
+[testenv]
+package = skip
+[testenv:a]
+depends = b
+[testenv:b]
+depends = a
+[testenv:cov]
+depends = a
+"""
+
+
+def test_depends_plan_circular_active(tox_project: ToxProjectCreator) -> None:
+    project = tox_project({"tox.ini": _CYCLE_INI})
+
+    outcome = project.run("de", "-e", "cov,a,b")
+
+    outcome.assert_failed(code=-2)
+    assert "circular dependency detected between environments: cov | a | b" in outcome.out, outcome.out
+
+
+def test_depends_plan_self_dependency_ignored(tox_project: ToxProjectCreator) -> None:
+    # a declaration matching only the environment itself is a scheduler no-op, not an undefined prerequisite
+    toml = """
+    env_list = ["a", "cov"]
+    [env_run_base]
+    package = "skip"
+    [env.cov]
+    depends = ["cov*", "ghost"]
+    """
+    project = tox_project({"tox.toml": toml})
+
+    outcome = project.run("de", "-e", "ALL")
+
+    outcome.assert_success()
+    expected = dedent("""\
+    Execution order: a, cov
+    a
+    cov
+       ghost (undefined)
+    """)
+    assert outcome.out == expected
+
+
+def test_depends_plan_circular_inactive(tox_project: ToxProjectCreator) -> None:
+    # a cycle living entirely outside the selection neither errors nor is traversed as an execution edge
+    project = tox_project({"tox.ini": _CYCLE_INI})
+
+    outcome = project.run("de", "-e", "cov")
+
+    outcome.assert_success()
+    expected = dedent("""\
+    Execution order: cov
+    cov
+       a (not selected)
+    """)
+    assert outcome.out == expected
