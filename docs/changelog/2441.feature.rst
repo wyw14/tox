@@ -1,0 +1,4 @@
+add ``tox plan`` (``tox pl``) command that previews the execution plan of the selected environments -- environment
+setup, the ``commands_pre``/``commands``/``commands_post`` command sets and which commands still run or are skipped
+when a stage fails -- including the effect of ``--notest``, ``--pkg-only``, ``--skip-pkg-install`` and
+``--skip-env-install``; the preview executes no command and does not assume exit codes

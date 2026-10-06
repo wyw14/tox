@@ -14,8 +14,8 @@
 SYNOPSIS
 ========
 
-**tox** [*options*] [**run** | **run-parallel** | **depends** | **man** | **list** | **devenv** | **schema** |
-**config** | **quickstart** | **exec** | **legacy**] [*command-options*]
+**tox** [*options*] [**run** | **run-parallel** | **depends** | **plan** | **man** | **list** | **devenv** |
+**schema** | **config** | **quickstart** | **exec** | **legacy**] [*command-options*]
 
 DESCRIPTION
 ===========
@@ -37,6 +37,9 @@ COMMANDS
 
 **depends** (*or* **de**)
     visualize tox environment dependencies
+
+**plan** (*or* **pl**)
+    preview the execution plan without running any command
 
 **man**
     Set up tox man page for current shell
